@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 # ==================== STANDARD IMPORTS ====================
 import sys
 import asyncio
@@ -10,6 +13,7 @@ import time
 import os
 import uuid
 import itertools
+import ipaddress
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -38,7 +42,7 @@ WEB_HOST = "0.0.0.0"
 WEB_PORT = 20335
 ACCOUNTS_FILE = "accounts.json"
 TOKEN_CACHE_FILE = "token_cache.json"
-DEVICES_FILE = "devices.json"  # 🔥 NEW: Persistent device storage
+DEVICES_FILE = "devices.json"
 TOKEN_CACHE_TTL = 1200
 
 # 🔥 Match control
@@ -46,7 +50,7 @@ START_MATCH_INTERVAL = 3.0
 NEW_MATCH_DELAY = 3.0   
 MAX_MATCH_DURATION = 700
 MATCH_IDLE_TIMEOUT = 8.0
-PRIORITY_REGIONS = ["BD","IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW"]
+PRIORITY_REGIONS = ["BD", "IND", "SG", "TH", "PH", "VN", "MY", "ID", "HK", "TW", "ME"]
 
 # 🔥 Cache invalidation thresholds
 MAX_CONSECUTIVE_PARSE_FAILURES = 5.0     
@@ -56,13 +60,51 @@ FALLBACK_UID = ""
 FALLBACK_PASSWORD = ""
 
 
+# ==================== IP ROTATOR (ME & REGIONAL FOCUS) ====================
+class IPRotator:
+    REGION_IP_CIDRS = {
+        "ME": [
+            "2.88.0.0/13", "5.100.0.0/14", "31.166.0.0/15", "37.104.0.0/13"
+        ],
+        "BD": [
+            "27.147.128.0/17", "37.111.192.0/19", "49.0.32.0/20", "59.152.96.0/20",
+            "114.130.0.0/17", "115.127.0.0/17", "119.30.32.0/20", "123.49.0.0/18"
+        ],
+        "IND": [
+            "1.6.0.0/15", "1.38.0.0/15", "14.96.0.0/15", "27.4.0.0/14", "27.56.0.0/13"
+        ]
+    }
+    _cache = {}
+
+    @classmethod
+    def get_random_ip(cls, region="ME"):
+        region = region.upper()
+        if region not in cls._cache:
+            cidrs = cls.REGION_IP_CIDRS.get(region, ["2.88.0.0/13"])
+            hosts = []
+            for cidr in cidrs:
+                try:
+                    net = ipaddress.ip_network(cidr, strict=False)
+                    for _ in range(3):
+                        ip_int = int(net.network_address) + random.randint(1, 2 ** (32 - net.prefixlen) - 2)
+                        hosts.append(str(ipaddress.IPv4Address(ip_int)))
+                except:
+                    continue
+            cls._cache[region] = hosts if hosts else ["2.88.0.1"]
+        return random.choice(cls._cache[region])
+
+    @classmethod
+    def get_ip_headers(cls, region="ME"):
+        ip = cls.get_random_ip(region)
+        return {
+            'X-Forwarded-For': ip,
+            'X-Real-IP': ip,
+            'Client-IP': ip
+        }
+
+
 # ==================== ULTRA SAFE PERSISTENT DEVICE RANDOMIZER ====================
 def get_device_for_account(account_identifier: str) -> dict:
-    """
-    Ensures 1 ID = 1 Specific Device.
-    It loads saved devices from devices.json. If the account isn't found, 
-    it generates a new profile and saves it permanently for this ID.
-    """
     devices = {}
     if os.path.exists(DEVICES_FILE):
         try:
@@ -76,7 +118,6 @@ def get_device_for_account(account_identifier: str) -> dict:
     if acc_key in devices:
         return devices[acc_key]
         
-    # Generate new device profile for this account
     device_list = [
         ("Samsung", "SM-G998B", "Adreno (TM) 660", "Android OS 12 / API-31"),
         ("Xiaomi", "2201122G", "Adreno (TM) 730", "Android OS 13 / API-33"),
@@ -99,7 +140,7 @@ def get_device_for_account(account_identifier: str) -> dict:
         "screen_dpi": str(random.randint(300, 420)),
         "memory": random.randint(2800, 6500),
         "processor_details": f"ARM64 FP ASIMD AES VMH | {random.randint(2200, 3200)} | {random.randint(6, 12)}",
-        "client_ip": f"{random.randint(103, 223)}.{random.randint(10, 250)}.{random.randint(10, 250)}.{random.randint(10, 250)}"
+        "client_ip": IPRotator.get_random_ip("ME")
     }
     
     devices[acc_key] = new_device
@@ -117,7 +158,7 @@ def get_device_for_account(account_identifier: str) -> dict:
 CLOUDFLARE_PRIMARY_DNS = "1.1.1.1"
 CLOUDFLARE_SECONDARY_DNS = "1.0.0.1"
 _DNS_CACHE: Dict[str, Tuple[str, float]] = {}
-_DNS_CACHE_TTL = 300.0  # 5 minutes DNS cache
+_DNS_CACHE_TTL = 300.0
 
 async def resolve_host_cloudflare(hostname: str) -> str:
     if not hostname:
@@ -261,28 +302,6 @@ _DELTA = 0x9E3779B9
 _ROUNDS = 16
 _FIELD_SIZES = {0: 1, 1: 2, 2: 2, 3: 1, 4: 2}
 _FIELD_NAMES = {0: "sendOption", 1: "cmd", 2: "orderId", 3: "flags", 4: "length"}
-
-sai_tail_dul = bytes.fromhex(
-    "0101030101045452000103000100000410312e3133302e3232"
-    "1432303139313231303430ca0163736f7665727365612e737472"
-    "6f6e67686f6c642e66726565666972656d6f62696c652e636f6d"
-    "3b302e302e302e303b33342e3132362e37362e34353b33342e38"
-    "372e3137372e31343b33342e38372e3137302e3233303b33352e"
-    "3138352e3138332e353700000000000001000000000000000000"
-    "0000000100000000000100000000000100b8eeec91c5d7ffde110200"
-)
-
-headers = {
-    'User-Agent': 'UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)',
-    'Connection': 'Keep-Alive',
-    'Accept-Encoding': 'gzip',
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'Expect': '100-continue',
-    'X-Unity-Version': '2018.4.12f1',
-    'X-GA-SV': '1789535859',
-    'X-GA': 'v1 1',
-    'ReleaseVersion': 'OB55'
-}
 
 class Colors:
     HEADER = '\033[95m'
@@ -482,7 +501,7 @@ async def version_config():
         "https://version.ggwhitehawk.com/live/ver.php"
         f"?version={app_version}"
         "&lang=hi&device=android&channel=android"
-        "&appstore=googleplay&region=BD"
+        "&appstore=googleplay&region=ME"
         "&whitelist_version=1.3.0&whitelist_sp_version=1.0.0"
     )
     try:
@@ -553,7 +572,7 @@ async def decode_protobuf(data):
     parsed_results_dict = await parse_results(parsed_results)
     return json.dumps(parsed_results_dict)
 
-async def build_majorlogin_payload(open_id, access_token, platform, client_version, device_info):
+async def build_majorlogin_payload(open_id, access_token, platform, client_version, device_info, region="ME"):
     try:
         proto = thunderFF_pb2.MajorLoginReq()
         proto.event_time = str(datetime.now())[:-7]
@@ -562,29 +581,27 @@ async def build_majorlogin_payload(open_id, access_token, platform, client_versi
         proto.client_version = client_version
         proto.client_version_code = "2019121229"
         
-        # --- INJECTING PERSISTENT DYNAMIC DEVICE DATA ---
-        proto.system_software = device_info.get("system_software", "Android OS 12 / API-31 (SP1A.210812.016.C2/user.dxu.20260701.180839)")
+        proto.system_software = device_info.get("system_software", "Android OS 12 / API-31")
         proto.system_hardware = device_info.get("brand", "Handheld")
         proto.device_type = device_info.get("model", "Handheld")
         proto.screen_width = int(device_info.get("screen_width", 1600))
         proto.screen_height = int(device_info.get("screen_height", 900))
         proto.screen_dpi = str(device_info.get("screen_dpi", "300"))
-        proto.processor_details = device_info.get("processor_details", "x86-64 SSE3 SSE4.1 SSE4.2 AVX | 2400 | 4")
+        proto.processor_details = device_info.get("processor_details", "ARM64 FP ASIMD AES | 2400 | 8")
         proto.memory = int(device_info.get("memory", 5951))
         proto.gpu_renderer = device_info.get("gpu_renderer", "Adreno (TM) 640")
-        proto.unique_device_id = device_info.get("unique_device_id", "Google|725030d8-6585-4f55-bcca-a6df7e59935b")
-        proto.client_ip = device_info.get("client_ip", "103.145.112.210")
-        # ------------------------------------------------
+        proto.unique_device_id = device_info.get("unique_device_id", f"Google|{str(uuid.uuid4())}")
+        proto.client_ip = device_info.get("client_ip", IPRotator.get_random_ip(region))
         
-        proto.telecom_operator = "Citycell"
-        proto.network_operator_a = "Citycell"
+        proto.telecom_operator = "Zain"
+        proto.network_operator_a = "Zain"
         proto.network_type = "WIFI"
         proto.network_type_a = "WIFI"
         proto.cpu_type = 2
         proto.cpu_architecture = "64"
         proto.gpu_version = "OpenGL ES 3.2"
         proto.graphics_api = "OpenGLES2"
-        proto.language = "en"
+        proto.language = "ar"
         proto.open_id = open_id
         proto.open_id_type = str(platform)
         proto.login_open_id_type = int(platform)
@@ -638,7 +655,6 @@ async def send_majorlogin(data, release_version, server_url):
         if len(response_content) < 40:
             return None
 
-        # 1. Direct parse
         res_proto = thunderFF_pb2.MajorLoginRes()
         try:
             res_proto.ParseFromString(response_content)
@@ -647,7 +663,6 @@ async def send_majorlogin(data, release_version, server_url):
         except Exception:
             pass
 
-        # 2. OB55 64-byte header offset check
         if len(response_content) > 64:
             try:
                 res_proto = thunderFF_pb2.MajorLoginRes()
@@ -657,7 +672,6 @@ async def send_majorlogin(data, release_version, server_url):
             except Exception:
                 pass
 
-        # 3. Dynamic offset search for OB55 compatibility
         for offset in range(min(128, len(response_content))):
             try:
                 candidate = thunderFF_pb2.MajorLoginRes()
@@ -716,28 +730,29 @@ async def send_getlogin(data, base_url, token, release_version):
     except Exception:
         return None
 
-async def build_tcp_startup_packet(account_id, token, server_time, key, iv, region="BD", typ='OnLine'):
+async def build_tcp_startup_packet(account_id, token, server_time, key, iv, region="ME", typ='OnLine'):
     uid_hex = f"{int(account_id):016x}"
     timestamp_hex = f"{int(server_time):08x}"
     encode_token = token.encode()
     encrypted_packet = (await aes_encrypt(encode_token, key, iv)).hex()
     encrypted_packet_length = f"{len(encrypted_packet) // 2:08x}"
-    reg = str(region).upper() if region else "BD"
+    reg = str(region).upper() if region else "ME"
+    
     if typ == 'OnLine':
-        prefix = '7119' if reg == 'BD' else ('7114' if reg == 'IND' else '7115')
+        prefix = '7118' if reg == 'ME' else ('7119' if reg == 'BD' else ('7114' if reg == 'IND' else '7115'))
         return f"{prefix}{uid_hex}{timestamp_hex}00000000{encrypted_packet_length}{encrypted_packet}"
-    else:  # ChaT / Informational
-        prefix = '9219' if reg == 'BD' else ('9214' if reg == 'IND' else '9215')
+    else:  
+        prefix = '9218' if reg == 'ME' else ('9219' if reg == 'BD' else ('9214' if reg == 'IND' else '9215'))
         return f"{prefix}{uid_hex}{timestamp_hex}{encrypted_packet_length}{encrypted_packet}"
 
-async def send_keep_alive(region="BD"):
-    """Send 2-byte keep-alive pulse to maintain connection in OB55"""
+async def send_keep_alive(region="ME"):
+    """Send 2-byte keep-alive pulse adapted for ME or other servers"""
     try:
-        reg = str(region).upper() if region else "BD"
-        ka_hex = "0219" if reg == "BD" else ("0214" if reg == "IND" else "0215")
+        reg = str(region).upper() if region else "ME"
+        ka_hex = "0218" if reg == "ME" else ("0219" if reg == "BD" else ("0214" if reg == "IND" else "0215"))
         return bytes.fromhex(ka_hex)
     except Exception:
-        return bytes.fromhex("0219")
+        return bytes.fromhex("0218")
 
 
 async def start_game_lone_wolf(region, client_version, writer, key, iv):
@@ -859,13 +874,12 @@ async def sv_frame(msg_key, layout, send_option, cmd, order_id, flags, content, 
     return bytes(packet)
 
 async def build_match_startup_packets(token, udp_key, match_code, account_id, block_val,
-                                      server_ip="", region="BD", client_version="1.132.6",
+                                      server_ip="", region="ME", client_version="1.132.6",
                                       client_version_code="2019121229", access_token=""):
     token = token.strip()
     udp_key = bytes.fromhex(udp_key)
     match_code = [int(ch) for ch in str(match_code).strip()]
     
-    # OB55 splits JWT match token at 660 bytes
     thunder_jwt = token[:660] if len(token) > 660 else token
     sharma_jwt = token[660:] if len(token) > 660 else ""
     encoded_thunder_jwt = thunder_jwt.encode() if isinstance(thunder_jwt, str) else thunder_jwt
@@ -873,8 +887,7 @@ async def build_match_startup_packets(token, udp_key, match_code, account_id, bl
     
     garena420 = await has_ssan_zig(len(encoded_thunder_jwt)) + encoded_thunder_jwt
     
-    # OB55 Sharma payload structure matching Wireshark capture
-    reg = str(region).upper() if region else "BD"
+    reg = str(region).upper() if region else "ME"
     csoversea_block = bytes.fromhex(
         "ca0163736f7665727365612e7374726f6e67686f6c642e66726565666972656d6f62696c652e636f6d"
         "3b302e302e302e303b33342e3132362e37362e34353b33342e38372e3137372e31343b33342e38372e"
@@ -1105,7 +1118,7 @@ async def decode_packet(packet, key, mask=None):
 
 
 # ============================================================
-# play_game — UDP MATCH (FIXED & DNS OPTIMIZED)
+# play_game — UDP MATCH
 # ============================================================
 async def play_game(server_ip_port, thunder, sharma, udp_key, match_code,
                     account_id, player_region, client_version, key, iv,
@@ -1368,7 +1381,6 @@ async def functional_lone_wolf(addrs, starter_packet, account_region, client_ver
                 writer.write(bytes.fromhex(current_token))
                 await writer.drain()
 
-                # Send initial keepalive pulse right after connecting in OB55
                 try:
                     init_ka = await send_keep_alive(account_region)
                     if init_ka and writer and not writer.is_closing():
@@ -1385,7 +1397,7 @@ async def functional_lone_wolf(addrs, starter_packet, account_region, client_ver
                 async def send_start_match():
                     nonlocal search_attempts, last_start_time
                     search_attempts += 1
-                    current_region = "BD"
+                    current_region = account_region if account_region else "ME"
                     print_info(f"[LONE WOLF] Sending StartMatch #{search_attempts} region: {current_region}")
                     try:
                         await asyncio.sleep(random.uniform(0.3, 0.6))
@@ -1470,7 +1482,7 @@ async def functional_lone_wolf(addrs, starter_packet, account_region, client_ver
                             if '5' in res and 'data' in res['5']:
                                 block_val = res['5']['data'].get('1', {}).get('data')
 
-                            effective_acc_id = match_account_id or account_id or "BD_BOT"
+                            effective_acc_id = match_account_id or account_id or "ME_BOT"
 
                             if token and udp_key and match_code and server_ip_port:
                                 acc_tok = ""
@@ -1503,7 +1515,7 @@ async def functional_lone_wolf(addrs, starter_packet, account_region, client_ver
                                         udp_key,
                                         match_code,
                                         effective_acc_id,
-                                        "BD",
+                                        account_region,
                                         client_version,
                                         current_key,
                                         current_iv,
@@ -1628,7 +1640,7 @@ async def functional_lone_wolf(addrs, starter_packet, account_region, client_ver
         raise
 
 
-async def informational(addrs, starter_packet, key, iv, region="BD", max_reconnects=3):
+async def informational(addrs, starter_packet, key, iv, region="ME", max_reconnects=3):
     reconnects = 0
     ip, port = addrs.split(":")
     while True:
@@ -1646,7 +1658,6 @@ async def informational(addrs, starter_packet, key, iv, region="BD", max_reconne
             await writer.drain()
             reconnects = 0
 
-            # Initial keepalive right after connecting
             try:
                 init_ka = await send_keep_alive(region)
                 if init_ka and writer and not writer.is_closing():
@@ -1761,7 +1772,7 @@ async def process_account_uid_pass(uid: str, password: str) -> Optional[Dict]:
         bot_state.register_account(
             uid=acc_id,
             nickname=cached.get('nickname', f"Player_{acc_id}"),
-            region=cached.get('region', 'BD'),
+            region=cached.get('region', 'ME'),
             level=cached.get('level', 1),
             exp=cached.get('exp', 0),
             likes=cached.get('likes', 0)
@@ -1781,10 +1792,9 @@ async def process_account_uid_pass(uid: str, password: str) -> Optional[Dict]:
             return None
         open_id, access_token, platform = tokengrant_response
         
-        # 🔥 1ta id 1ta Device Injection
         device_info = get_device_for_account(uid)
         
-        login_payload_data = await build_majorlogin_payload(open_id, access_token, platform, client_version, device_info)
+        login_payload_data = await build_majorlogin_payload(open_id, access_token, platform, client_version, device_info, region="ME")
         majorlogin_response = await send_majorlogin(login_payload_data, release_version, server_url)
         if majorlogin_response is None:
             return None
@@ -1798,7 +1808,7 @@ async def process_account_uid_pass(uid: str, password: str) -> Optional[Dict]:
         exp = int(get_proto_field(dict_res, 7, 0))
         likes = int(get_proto_field(dict_res, 8, 0))
         nickname = res_proto.nickname or get_proto_field(dict_res, 4, f"Player_{acc_id}")
-        region = majorlogin_response.region or get_proto_field(dict_res, 3, "BD")
+        region = majorlogin_response.region or get_proto_field(dict_res, 3, "ME")
 
         bot_state.register_account(uid=acc_id, nickname=nickname, region=region, level=level, exp=exp, likes=likes)
 
@@ -1843,7 +1853,7 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
         bot_state.register_account(
             uid=acc_id,
             nickname=cached.get('nickname', f"Player_{acc_id}"),
-            region=cached.get('region', 'BD'),
+            region=cached.get('region', 'ME'),
             level=cached.get('level', 1),
             exp=cached.get('exp', 0),
             likes=cached.get('likes', 0)
@@ -1879,10 +1889,9 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
         if not open_id:
             return None
 
-        # 🔥 1ta id 1ta Device Injection (using unique open_id as the key)
         device_info = get_device_for_account(open_id)
 
-        login_payload_data = await build_majorlogin_payload(open_id, access_token, str(platform), client_version, device_info)
+        login_payload_data = await build_majorlogin_payload(open_id, access_token, str(platform), client_version, device_info, region="ME")
         if not login_payload_data:
             return None
 
@@ -1905,7 +1914,7 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
         exp = int(get_proto_field(dict_res, 7, 0))
         likes = int(get_proto_field(dict_res, 8, 0))
         nickname = res_proto.nickname or get_proto_field(dict_res, 4, f"Player_{acc_id}")
-        region = majorlogin_response.region or get_proto_field(dict_res, 3, "BD")
+        region = majorlogin_response.region or get_proto_field(dict_res, 3, "ME")
 
         bot_state.register_account(uid=acc_id, nickname=nickname, region=region, level=level, exp=exp, likes=likes)
 
@@ -1929,7 +1938,6 @@ async def process_account_token(access_token: str) -> Optional[Dict]:
             'client_version': client_version,
             'server_url': majorlogin_response.url,
             'login_payload_data': login_payload_data,
-            'platform': platform,
             'auth_type': 'token',
             'auth_token': access_token
         }
@@ -1946,7 +1954,7 @@ async def run_account_worker(account_data: Dict, label: str):
     informational_task = None
     exp_task = None
     try:
-        reg = account_data.get('region', 'BD')
+        reg = account_data.get('region', 'ME')
         tcp_packet_online = await build_tcp_startup_packet(
             account_data['account_id'],
             account_data['token'],
@@ -2096,8 +2104,8 @@ def load_accounts():
 
 async def main():
     print_colored("=" * 60, Colors.CYAN)
-    print_colored("    TEAM 84FF - FreeFire Level Up Bot (Web Dashboard Mode)", Colors.GREEN)
-    print_colored("   Persistent Device ID + TRUE Parallel + Smart DNS", Colors.WHITE)
+    print_colored("    TEAM 84FF - FreeFire Level Up Bot (ME Server Mode)", Colors.GREEN)
+    print_colored("   Persistent Device ID + TRUE Parallel + Smart DNS (ME Support)", Colors.WHITE)
     print_colored("=" * 60, Colors.CYAN)
     print_info(f"Start Match Interval: {START_MATCH_INTERVAL}s")
     print_info(f"Offline Wait: {NEW_MATCH_DELAY}s (after match found)")
@@ -2106,7 +2114,6 @@ async def main():
     print_info(f"Parallel Matches: UNLIMITED (background)")
     print_info(f"Cache TTL: {TOKEN_CACHE_TTL}s ({TOKEN_CACHE_TTL//60} min)")
     print_info(f"Priority Regions: {PRIORITY_REGIONS}")
-    print_info("Device System: 1 ID = 1 Persistent Device ID (devices.json)")
     print_colored("=" * 60, Colors.CYAN)
 
     try:
